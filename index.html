@@ -146,7 +146,7 @@ async function nflTeam(t){
     const scoreIcon=desc=>/TOUCHDOWN/i.test(desc)?'🏈':/FIELD GOAL/i.test(desc)?'🥅':/SAFETY/i.test(desc)?'🛡️':/EXTRA POINT|TWO-POINT|2-POINT/i.test(desc)?'➕':'⭐';
     // "what matters": scoring plays (TD / FG / safety / XP / 2pt)
     scoring=plays.filter(p=>/TOUCHDOWN|FIELD GOAL|SAFETY|EXTRA POINT|TWO-POINT|2-POINT/i.test(p.playDescription||''))
-      .slice(-5).map(p=>({min:playMin(p),ic:scoreIcon(p.playDescription||''),txt:(p.playDescription||'').slice(0,75)}));
+      .slice(-5).reverse().map(p=>({min:playMin(p),ic:scoreIcon(p.playDescription||''),txt:(p.playDescription||'').slice(0,75)}));
     if(phase==='FINAL'||phase==='FINAL_OVERTIME'){ clock='Final'; }
     else if(live){
       const q=gd.period?('Q'+gd.period):''; const gc=gd.gameClock||'';
@@ -173,7 +173,7 @@ function isLive(e){return IN_PLAY.has((e.strStatus||'').trim())||!!(e.strProgres
 const EV_ICON=d=>/red/i.test(d)?'🟥':/yellow/i.test(d)?'🟨':/goal/i.test(d)?'⚽':/subst/i.test(d)?'🔁':/var/i.test(d)?'📺':'•';
 async function timeline(eid){
   try{ const d=await getJSON(`${TSDB}/lookuptimeline.php?id=${eid}`); const t=d.timeline||[];
-    return t.filter(x=>x.strTimeline&&x.strTimeline!=='Var').slice(-8).map(x=>({
+    return t.filter(x=>x.strTimeline&&x.strTimeline!=='Var').slice(-8).reverse().map(x=>({
       min:(x.intTime?x.intTime+"'":''), ic:EV_ICON((x.strTimeline||'')+' '+(x.strTimelineDetail||'')),
       txt:`${x.strTimelineDetail||x.strTimeline} — ${x.strPlayer||''}`.trim()}));
   }catch(e){ return []; }
@@ -197,12 +197,14 @@ async function tsdbTeam(t){
       events=await timeline(show.idEvent); }   // show goals/cards for finished games too
     else clock='Kickoff '+(isNaN(k)?show.dateEvent:fmtDate(new Date(k).toISOString()));
   }
-  const news=last.slice(0,4).map(e=>({title:`${e.strEvent} — ${e.intHomeScore??'–'}:${e.intAwayScore??'–'}`,
+  const news=last.slice().sort((a,b)=>String(b.dateEvent||'').localeCompare(String(a.dateEvent||'')))
+    .slice(0,4).map(e=>({title:`${e.strEvent} — ${e.intHomeScore??'–'}:${e.intAwayScore??'–'}`,
     link:`https://www.thesportsdb.com/event/${e.idEvent}`,when:e.dateEvent}));
   return {t,live,scoreHTML,clock,hl:null,events,news};
 }
 async function leagueFeed(cfg){
   let items=[]; try{items=(await getJSON(`${TSDB}/eventspastleague.php?id=${cfg.id}`)).events||[];}catch(e){}
+  items=items.slice().sort((a,b)=>String(b.dateEvent||'').localeCompare(String(a.dateEvent||''))); // newest first
   return {title:cfg.title,news:items.slice(0,6).map(e=>({title:`${e.strEvent} — ${e.intHomeScore??'–'}:${e.intAwayScore??'–'}`,
     link:`https://www.thesportsdb.com/event/${e.idEvent}`,when:e.dateEvent}))};
 }
@@ -229,12 +231,29 @@ function gameBlock(d){ if(!d.scoreHTML) return '';
   return h+'</div>'; }
 function newsBlock(news){ if(!news||!news.length) return '<div class="news"><div class="empty">No recent updates.</div></div>';
   return '<div class="news">'+news.map(n=>`<a class="news-row row" href="${n.link}" target="_blank" rel="noopener">${n.title}<div class="when">${n.when?fmtDate(n.when):''}</div></a>`).join('')+'</div>'; }
+function staleTag(d){ return d && d.stale ? '<span class="league" style="color:#eab308"> · cached</span>' : ''; }
 function teamCard(d){ return `<div class="card"><div class="head"><span class="name">${d.t.name}</span>`
-  +`<span class="league">${d.t.league}</span><span class="live-pill${d.live?' on':''}">● LIVE</span></div>`+gameBlock(d)+newsBlock(d.news)+`</div>`; }
+  +`<span class="league">${d.t.league}</span>${staleTag(d)}<span class="live-pill${d.live?' on':''}">● LIVE</span></div>`+gameBlock(d)+newsBlock(d.news)+`</div>`; }
 function nflCol(d){ return `<div class="col"><div class="head"><span class="name">${d.t.name}</span>`
-  +`<span class="live-pill${d.live?' on':''}">● LIVE</span></div>`+gameBlock(d)+newsBlock(d.news)+`</div>`; }
+  +`${staleTag(d)}<span class="live-pill${d.live?' on':''}">● LIVE</span></div>`+gameBlock(d)+newsBlock(d.news)+`</div>`; }
 
 let busy=false;
+// Cache last-good render data per key so a failed/empty fetch doesn't blank a card.
+function cacheGet(key){ try{return JSON.parse(localStorage.getItem('st_'+key)||'null');}catch(e){return null;} }
+function cacheSet(key,val){ try{localStorage.setItem('st_'+key,JSON.stringify(val));}catch(e){} }
+function hasData(d){ return d && (d.scoreHTML || (d.news&&d.news.length) || (d.events&&d.events.length)
+  || (d.scoring&&d.scoring.length) || (d.latest&&d.latest.length)); }
+// run a fetcher; on failure/empty, fall back to cached last-good (flagged stale)
+async function withCache(key, fn){
+  try{
+    const d=await fn();
+    if(hasData(d)){ cacheSet(key,d); return d; }
+    const c=cacheGet(key); return c? Object.assign({},c,{stale:true}) : d;
+  }catch(e){
+    const c=cacheGet(key); if(c) return Object.assign({},c,{stale:true});
+    throw e;
+  }
+}
 async function refreshAll(){
   if(busy)return; busy=true; $('#status').textContent='updating…';
   nflGames=null; // re-resolve each cycle
@@ -242,10 +261,12 @@ async function refreshAll(){
   const err=t=>e=>({t,live:false,scoreHTML:'',clock:'',hl:null,events:[],news:[{title:"Couldn't load",link:'#',when:''}]});
   try{
     const [gb,pit,mci,nor,epl,swe]=await Promise.all([
-      nflTeam(NFL[0]).catch(err(NFL[0])), nflTeam(NFL[1]).catch(err(NFL[1])),
-      tsdbTeam(MCI).catch(err(MCI)), tsdbTeam(NOR).catch(err(NOR)),
-      leagueFeed(EPL_LEAGUE).catch(()=>({title:EPL_LEAGUE.title,news:[]})),
-      leagueFeed(SWE_LEAGUE).catch(()=>({title:SWE_LEAGUE.title,news:[]})),
+      withCache('gb', ()=>nflTeam(NFL[0])).catch(err(NFL[0])),
+      withCache('pit',()=>nflTeam(NFL[1])).catch(err(NFL[1])),
+      withCache('mci',()=>tsdbTeam(MCI)).catch(err(MCI)),
+      withCache('nor',()=>tsdbTeam(NOR)).catch(err(NOR)),
+      withCache('epl',()=>leagueFeed(EPL_LEAGUE)).catch(()=>({title:EPL_LEAGUE.title,news:[]})),
+      withCache('swe',()=>leagueFeed(SWE_LEAGUE)).catch(()=>({title:SWE_LEAGUE.title,news:[]})),
     ]);
     let h='<h2 class="sec">NFL</h2>';
     h+=`<div class="card span2"><div class="nfl-row">${nflCol(gb)}${nflCol(pit)}</div></div>`;
@@ -255,7 +276,7 @@ async function refreshAll(){
     h+=`<div class="card"><div class="head"><span class="name">Other results</span><span class="league">${swe.title}</span></div>${newsBlock(swe.news)}</div>`;
     grid.innerHTML=h;
     const live=grid.querySelectorAll('.live-pill.on').length;
-    REFRESH_MS = live? 25000 : 60000;  // tighten cadence during live games
+    REFRESH_MS = live? 30000 : 90000;  // tighten cadence during live games
     $('#status').textContent=(live?live+' live · ':'')+'updated '+new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
   }catch(e){ $('#status').textContent='error: '+e.message; }
   finally{ busy=false; schedule(); }
