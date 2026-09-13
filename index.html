@@ -40,7 +40,10 @@
   .hl .k{color:var(--accent);font-weight:700}
   .events{list-style:none;margin:6px 0 0;padding:0}
   .events li{font-size:12px;padding:2px 0;border-top:1px solid #2230;display:flex;gap:6px;align-items:baseline}
+  .events li.blank{color:transparent}
   .events .min{color:var(--muted);min-width:26px;font-variant-numeric:tabular-nums}
+  .evsec{margin-top:6px}
+  .evlabel{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:700;margin-bottom:1px}
   .ic{font-size:11px}
   .news{padding:4px 12px 10px}
   .news .row{display:block;color:var(--text);text-decoration:none;padding:6px 0;border-top:1px solid var(--line);font-size:13px;line-height:1.3}
@@ -138,7 +141,12 @@ async function nflTeam(t){
     const live=isNflLive({phase});
     let scoreHTML=`<span>${(away.nickName||away.abbreviation||'')}</span><span class="num">${as??'–'}</span>`
       +`<span class="vs">@</span><span class="num">${hs??'–'}</span><span>${(home.nickName||home.abbreviation||'')}</span>`;
-    let clock, hl=null, events=[];
+    let clock, hl=null, scoring=[], latest=[];
+    const plays=gd.plays||[];
+    const scoreIcon=desc=>/TOUCHDOWN/i.test(desc)?'🏈':/FIELD GOAL/i.test(desc)?'🥅':/SAFETY/i.test(desc)?'🛡️':/EXTRA POINT|TWO-POINT|2-POINT/i.test(desc)?'➕':'⭐';
+    // "what matters": scoring plays (TD / FG / safety / XP / 2pt)
+    scoring=plays.filter(p=>/TOUCHDOWN|FIELD GOAL|SAFETY|EXTRA POINT|TWO-POINT|2-POINT/i.test(p.playDescription||''))
+      .slice(-5).map(p=>({min:playMin(p),ic:scoreIcon(p.playDescription||''),txt:(p.playDescription||'').slice(0,75)}));
     if(phase==='FINAL'||phase==='FINAL_OVERTIME'){ clock='Final'; }
     else if(live){
       const q=gd.period?('Q'+gd.period):''; const gc=gd.gameClock||'';
@@ -146,19 +154,17 @@ async function nflTeam(t){
       const poss=gd.possessionTeam&&(gd.possessionTeam.nickName||gd.possessionTeam.abbreviation);
       const dd = gd.down? (ordinal(gd.down)+' & '+(gd.goalToGo?'Goal':gd.distance)) : '';
       hl=`<span class="k">${dd}</span>`+(poss?` · ${poss} ball`:'')+(gd.redzone?' · 🔴 RZ':'');
-      // last play
-      const plays=gd.plays||[]; const lp=plays.length?plays[plays.length-1]:null;
-      if(lp&&lp.playDescription) hl+=`<br>${lp.playDescription}`;
-      // last few scoring/big plays
-      events=plays.filter(p=>p.isBigPlay||/TOUCHDOWN|FIELD GOAL|INTERCEPT|FUMBLE/i.test(p.playDescription||''))
-        .slice(-4).map(p=>({min:(p.clockTime||'')+'',ic:'🏈',txt:(p.playDescription||'').slice(0,70)}));
+      // "latest": most recent plays of any kind
+      latest=plays.slice(-5).reverse().map(p=>({min:playMin(p),ic:'•',txt:(p.playDescription||'').slice(0,75)}));
     } else { clock='Kickoff '+fmtDate(g.time||g.gameTime||g.date); }
-    return {t,live,scoreHTML,clock,hl,events,news:[]};
+    return {t,live,scoreHTML,clock,hl,scoring,latest,news:[]};
   }catch(e){
     return tsdbTeam(t); // fallback to TheSportsDB if NFL API changes/fails
   }
 }
 function ordinal(n){return n+({1:'st',2:'nd',3:'rd'}[n]||'th');}
+function playMin(p){ const q=p.quarter||p.period; const c=p.clockTime||p.time||''; 
+  return (q?('Q'+q):'')+(c?(' '+c):''); }
 
 /* ---------- soccer/football via TheSportsDB ---------- */
 const IN_PLAY=new Set(['1H','2H','HT','ET','PEN','LIVE','Playing','In Play']);
@@ -202,11 +208,24 @@ async function leagueFeed(cfg){
 }
 
 /* ---------- render ---------- */
+function evList(items){ // render exactly 5 rows, padding blanks to reserve height
+  const rows=(items||[]).slice(0,5);
+  while(rows.length<5) rows.push(null);
+  return '<ul class="events">'+rows.map(e=>e
+    ?`<li><span class="min">${e.min||''}</span><span class="ic">${e.ic||''}</span><span>${e.txt||''}</span></li>`
+    :`<li class="blank">&nbsp;</li>`).join('')+'</ul>';
+}
 function gameBlock(d){ if(!d.scoreHTML) return '';
   let h=`<div class="game"><div class="score">${d.scoreHTML}</div><div class="clock">${d.clock||''}</div>`;
   if(d.live&&d.hl) h+=`<div class="hl">${d.hl}</div>`;
-  if(d.events&&d.events.length){ h+='<ul class="events">'+
-    d.events.map(e=>`<li><span class="min">${e.min||''}</span><span class="ic">${e.ic||''}</span><span>${e.txt||''}</span></li>`).join('')+'</ul>'; }
+  // NFL: two reserved sections — scoring (what matters) + latest plays
+  if(d.scoring!==undefined || d.latest!==undefined){
+    h+='<div class="evsec"><div class="evlabel">Scoring</div>'+evList(d.scoring)+'</div>';
+    if(d.live) h+='<div class="evsec"><div class="evlabel">Latest</div>'+evList(d.latest)+'</div>';
+  } else if(d.events&&d.events.length){ // soccer single timeline
+    h+='<ul class="events">'+
+      d.events.map(e=>`<li><span class="min">${e.min||''}</span><span class="ic">${e.ic||''}</span><span>${e.txt||''}</span></li>`).join('')+'</ul>';
+  }
   return h+'</div>'; }
 function newsBlock(news){ if(!news||!news.length) return '<div class="news"><div class="empty">No recent updates.</div></div>';
   return '<div class="news">'+news.map(n=>`<a class="news-row row" href="${n.link}" target="_blank" rel="noopener">${n.title}<div class="when">${n.when?fmtDate(n.when):''}</div></a>`).join('')+'</div>'; }
