@@ -7,13 +7,13 @@
 <title>My Teams — Live Ticker</title>
 <style>
   :root{--bg:#0b1020;--card:#151b2e;--card2:#1b2340;--text:#eef2ff;--muted:#8b93b0;
-    --line:#273056;--live:#e5484d;--accent:#3b82f6;--ok:#22c55e;}
+    --line:#273056;--live:#e5484d;--accent:#3b82f6;--ok:#22c55e;--gold:#eab308;}
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-text-size-adjust:100%;}
   header{position:sticky;top:0;z-index:5;background:rgba(11,16,32,.95);backdrop-filter:saturate(150%) blur(8px);
     border-bottom:1px solid var(--line);padding:12px 16px;display:flex;align-items:center;gap:10px;}
-  header h1{font-size:17px;margin:0;font-weight:700;letter-spacing:.3px}
+  header h1{font-size:17px;margin:0;font-weight:700}
   header .status{margin-left:auto;font-size:12px;color:var(--muted)}
   .refresh{cursor:pointer;border:1px solid var(--line);background:var(--card2);color:var(--text);border-radius:8px;padding:5px 10px;font-size:12px}
   .wrap{max-width:1000px;margin:0 auto;padding:12px}
@@ -36,6 +36,12 @@
   .score .vs{color:var(--muted);font-weight:600;font-size:12px}
   .score .num{min-width:20px;text-align:center}
   .clock{color:var(--muted);font-size:11px;margin-top:2px}
+  .hl{margin-top:6px;font-size:12px;background:var(--card2);border-radius:8px;padding:6px 8px;border:1px solid var(--line)}
+  .hl .k{color:var(--accent);font-weight:700}
+  .events{list-style:none;margin:6px 0 0;padding:0}
+  .events li{font-size:12px;padding:2px 0;border-top:1px solid #2230;display:flex;gap:6px;align-items:baseline}
+  .events .min{color:var(--muted);min-width:26px;font-variant-numeric:tabular-nums}
+  .ic{font-size:11px}
   .news{padding:4px 12px 10px}
   .news .row{display:block;color:var(--text);text-decoration:none;padding:6px 0;border-top:1px solid var(--line);font-size:13px;line-height:1.3}
   .news .row:first-child{border-top:none}
@@ -53,99 +59,189 @@
   <span class="status" id="status">loading…</span>
 </header>
 <div class="wrap"><div class="grid" id="grid"></div></div>
-<footer>Data: TheSportsDB (free public API) · auto-refresh 60s</footer>
+<footer>Data: NFL.com (NFL) &amp; TheSportsDB (football) · refresh adapts to live games</footer>
 
 <script>
-// All data from TheSportsDB — one browser-friendly (CORS-enabled) source, no proxy.
-const K='https://www.thesportsdb.com/api/v1/json/3';
+const TSDB='https://www.thesportsdb.com/api/v1/json/3';
+// NFL teams by nickName (as returned by api.nfl.com) + TheSportsDB id for fallback
 const NFL=[
-  {name:'Packers',  id:'134940', league:'NFL'},
-  {name:'Steelers', id:'134925', league:'NFL'},
+  {name:'Packers',  nick:'Packers',  tsdb:'134940', league:'NFL'},
+  {name:'Steelers', nick:'Steelers', tsdb:'134925', league:'NFL'},
 ];
 const MCI={name:'Manchester City', id:'133613', league:'Premier League'};
 const NOR={name:'IFK Norrköping',  id:'134165', league:'Superettan'};
-// league ids for "other news" (recent results across the league)
-const EPL_LEAGUE={id:'4328', title:'Premier League'};   // English Premier League
+const EPL_LEAGUE={id:'4328', title:'Premier League'};
 const SWE_LEAGUE={id:'4403', title:'Superettan'};
-const REFRESH_MS=60000;
+// NFL public client key (embedded in NFL.com's own site JS — not a secret)
+const NFL_CK='tjOchlWFzl1SQgkQWgHzKDGhsG9LpzGb', NFL_CS='IUwRxki8PY8ORm3q';
+let REFRESH_MS=60000;
 
 const $=s=>document.querySelector(s);
-async function getJSON(u){const r=await fetch(u,{cache:'no-store'});if(!r.ok)throw new Error(r.status);return r.json();}
+async function getJSON(u,opt){const r=await fetch(u,Object.assign({cache:'no-store'},opt||{}));if(!r.ok)throw new Error(r.status);return r.json();}
 function fmtDate(s){try{return new Date(s).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});}catch(e){return s||'';}}
-const IN_PLAY=new Set(['1H','2H','HT','ET','PEN','LIVE','Playing','In Play','Q1','Q2','Q3','Q4']);
-function ksMillis(e){ if(e.strTimestamp) return Date.parse(e.strTimestamp+'Z');
-  if(e.dateEvent) return Date.parse(e.dateEvent+'T'+(e.strTime||'00:00:00')+'Z'); return NaN; }
-function isLive(e){ return IN_PLAY.has((e.strStatus||'').trim()) || !!(e.strProgress&&String(e.strProgress).trim()); }
 
-async function team(t){
+/* ---------- NFL via api.nfl.com ---------- */
+let nflToken=null, nflGames=null;
+async function nflAuth(){
+  if(nflToken) return nflToken;
+  const d=await getJSON('https://api.nfl.com/identity/v3/token',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({clientKey:NFL_CK,clientSecret:NFL_CS,
+      deviceId:'00000000-0000-0000-0000-000000000000',deviceInfo:'eyJtb2RlbCI6IndlYiJ9',networkType:'other'})});
+  nflToken=d.accessToken; return nflToken;
+}
+function nflSeason(){ const n=new Date(); let y=n.getUTCFullYear(); if(n.getUTCMonth()<2) y-=1; return y; }
+async function nflWeekGames(){
+  if(nflGames) return nflGames;
+  const tk=await nflAuth();
+  const season=nflSeason();
+  const today=new Date().toISOString().slice(0,10);
+  let best=null, bestScore=-1;
+  for(const wk of nflWeekGuess()){
+    try{
+      const d=await getJSON(`https://api.nfl.com/experience/v1/games?season=${season}&seasonType=REG&week=${wk}`,
+        {headers:{Authorization:'Bearer '+tk}});
+      const games=d.games||[];
+      if(!games.length) continue;
+      let score=0;
+      if(games.some(isNflLive)) score=100;
+      else if(games.some(g=>((g.gameTime||g.date||'')+'').slice(0,10)===today)) score=50;
+      else { const now=Date.now();
+        const nearest=Math.min(...games.map(g=>Math.abs(Date.parse(g.time||g.gameTime||g.date)-now)||9e15));
+        score=10 - nearest/864e5; }
+      if(score>bestScore){ bestScore=score; best=games; best._week=wk; }
+      if(score>=100) break;
+    }catch(e){}
+  }
+  nflGames=best||[]; return nflGames;
+}
+function nflWeekGuess(){ // NFL regular season week ~ (weeks since early Sept)
+  const now=new Date(), start=new Date(Date.UTC(nflSeason(),8,4)); // ~Sep 4
+  const wk=Math.max(1,Math.min(18,Math.floor((now-start)/(7*864e5))+1));
+  return [wk, wk-1, wk+1].filter(w=>w>=1&&w<=18);
+}
+function isNflLive(g){ const p=(g.status||g.phase||'').toString().toUpperCase();
+  return ['INGAME','IN_PROGRESS','HALFTIME','LIVE','SUSPENDED'].includes(p); }
+
+async function nflTeam(t){
+  try{
+    const tk=await nflAuth();
+    const games=await nflWeekGames();
+    const g=(games||[]).find(x=>(x.homeTeam&&x.homeTeam.nickName===t.nick)||(x.awayTeam&&x.awayTeam.nickName===t.nick));
+    if(!g) throw new Error('no game');
+    const det=(await getJSON(`https://api.nfl.com/experience/v1/gamedetails/${g.id}`,
+      {headers:{Authorization:'Bearer '+tk}})).data;
+    const gd=det.viewer? det.viewer.gameDetail : (det.gameDetail||det);
+    const home=gd.homeTeam||g.homeTeam, away=gd.awayTeam||g.awayTeam;
+    const hs=gd.homePointsTotal, as=gd.visitorPointsTotal!=null?gd.visitorPointsTotal:gd.awayPointsTotal;
+    const phase=(gd.phase||'').toUpperCase();
+    const live=isNflLive({phase});
+    let scoreHTML=`<span>${(away.nickName||away.abbreviation||'')}</span><span class="num">${as??'–'}</span>`
+      +`<span class="vs">@</span><span class="num">${hs??'–'}</span><span>${(home.nickName||home.abbreviation||'')}</span>`;
+    let clock, hl=null, events=[];
+    if(phase==='FINAL'||phase==='FINAL_OVERTIME'){ clock='Final'; }
+    else if(live){
+      const q=gd.period?('Q'+gd.period):''; const gc=gd.gameClock||'';
+      clock='● LIVE '+q+(gc?' '+gc:'');
+      const poss=gd.possessionTeam&&(gd.possessionTeam.nickName||gd.possessionTeam.abbreviation);
+      const dd = gd.down? (ordinal(gd.down)+' & '+(gd.goalToGo?'Goal':gd.distance)) : '';
+      hl=`<span class="k">${dd}</span>`+(poss?` · ${poss} ball`:'')+(gd.redzone?' · 🔴 RZ':'');
+      // last play
+      const plays=gd.plays||[]; const lp=plays.length?plays[plays.length-1]:null;
+      if(lp&&lp.playDescription) hl+=`<br>${lp.playDescription}`;
+      // last few scoring/big plays
+      events=plays.filter(p=>p.isBigPlay||/TOUCHDOWN|FIELD GOAL|INTERCEPT|FUMBLE/i.test(p.playDescription||''))
+        .slice(-4).map(p=>({min:(p.clockTime||'')+'',ic:'🏈',txt:(p.playDescription||'').slice(0,70)}));
+    } else { clock='Kickoff '+fmtDate(g.time||g.gameTime||g.date); }
+    return {t,live,scoreHTML,clock,hl,events,news:[]};
+  }catch(e){
+    return tsdbTeam(t); // fallback to TheSportsDB if NFL API changes/fails
+  }
+}
+function ordinal(n){return n+({1:'st',2:'nd',3:'rd'}[n]||'th');}
+
+/* ---------- soccer/football via TheSportsDB ---------- */
+const IN_PLAY=new Set(['1H','2H','HT','ET','PEN','LIVE','Playing','In Play']);
+function ksMillis(e){ if(e.strTimestamp)return Date.parse(e.strTimestamp+'Z'); if(e.dateEvent)return Date.parse(e.dateEvent+'T'+(e.strTime||'00:00:00')+'Z'); return NaN;}
+function isLive(e){return IN_PLAY.has((e.strStatus||'').trim())||!!(e.strProgress&&String(e.strProgress).trim());}
+const EV_ICON=d=>/red/i.test(d)?'🟥':/yellow/i.test(d)?'🟨':/goal/i.test(d)?'⚽':/subst/i.test(d)?'🔁':/var/i.test(d)?'📺':'•';
+async function timeline(eid){
+  try{ const d=await getJSON(`${TSDB}/lookuptimeline.php?id=${eid}`); const t=d.timeline||[];
+    return t.filter(x=>x.strTimeline&&x.strTimeline!=='Var').slice(-8).map(x=>({
+      min:(x.intTime?x.intTime+"'":''), ic:EV_ICON((x.strTimeline||'')+' '+(x.strTimelineDetail||'')),
+      txt:`${x.strTimelineDetail||x.strTimeline} — ${x.strPlayer||''}`.trim()}));
+  }catch(e){ return []; }
+}
+async function tsdbTeam(t){
   let last=[],next=[];
-  try{last=(await getJSON(`${K}/eventslast.php?id=${t.id}`)).results||[];}catch(e){}
-  try{next=(await getJSON(`${K}/eventsnext.php?id=${t.id}`)).events||[];}catch(e){}
+  try{last=(await getJSON(`${TSDB}/eventslast.php?id=${t.id||t.tsdb}`)).results||[];}catch(e){}
+  try{next=(await getJSON(`${TSDB}/eventsnext.php?id=${t.id||t.tsdb}`)).events||[];}catch(e){}
   const show=[...next,...last].find(isLive)||next[0]||last[0];
-  let live=false,scoreHTML='',clock='';
+  let live=false,scoreHTML='',clock='',events=[];
   if(show){
     const played=show.intHomeScore!=null&&show.intHomeScore!=='';
     live=isLive(show);
     scoreHTML=`<span>${show.strHomeTeam||''}</span><span class="num">${played?show.intHomeScore:'–'}</span>`
       +`<span class="vs">${t.league==='NFL'?'@':'v'}</span><span class="num">${played?show.intAwayScore:'–'}</span><span>${show.strAwayTeam||''}</span>`;
     const k=ksMillis(show),st=(show.strStatus||'').trim();
-    if(live) clock='● LIVE'+(show.strProgress?' · '+show.strProgress:(st?' · '+st:''));
+    if(live){ clock='● LIVE'+(show.strProgress?' · '+show.strProgress:(st?' · '+st:''));
+      events=await timeline(show.idEvent); }
     else if(st==='Match Finished'||st==='FT'||played) clock='FT · '+(isNaN(k)?show.dateEvent:fmtDate(new Date(k).toISOString()));
     else clock='Kickoff '+(isNaN(k)?show.dateEvent:fmtDate(new Date(k).toISOString()));
   }
-  // "news" = recent results for this team
   const news=last.slice(0,4).map(e=>({title:`${e.strEvent} — ${e.intHomeScore??'–'}:${e.intAwayScore??'–'}`,
     link:`https://www.thesportsdb.com/event/${e.idEvent}`,when:e.dateEvent}));
-  return {t,live,scoreHTML,clock,news};
+  return {t,live,scoreHTML,clock,hl:null,events,news};
 }
-
 async function leagueFeed(cfg){
-  let items=[];
-  try{ const d=await getJSON(`${K}/eventspastleague.php?id=${cfg.id}`); items=d.events||[]; }catch(e){}
-  const news=items.slice(0,6).map(e=>({title:`${e.strEvent} — ${e.intHomeScore??'–'}:${e.intAwayScore??'–'}`,
-    link:`https://www.thesportsdb.com/event/${e.idEvent}`,when:e.dateEvent}));
-  return {title:cfg.title,news};
+  let items=[]; try{items=(await getJSON(`${TSDB}/eventspastleague.php?id=${cfg.id}`)).events||[];}catch(e){}
+  return {title:cfg.title,news:items.slice(0,6).map(e=>({title:`${e.strEvent} — ${e.intHomeScore??'–'}:${e.intAwayScore??'–'}`,
+    link:`https://www.thesportsdb.com/event/${e.idEvent}`,when:e.dateEvent}))};
 }
 
+/* ---------- render ---------- */
 function gameBlock(d){ if(!d.scoreHTML) return '';
-  return `<div class="game"><div class="score">${d.scoreHTML}</div><div class="clock">${d.clock||''}</div></div>`; }
+  let h=`<div class="game"><div class="score">${d.scoreHTML}</div><div class="clock">${d.clock||''}</div>`;
+  if(d.live&&d.hl) h+=`<div class="hl">${d.hl}</div>`;
+  if(d.events&&d.events.length){ h+='<ul class="events">'+
+    d.events.map(e=>`<li><span class="min">${e.min||''}</span><span class="ic">${e.ic||''}</span><span>${e.txt||''}</span></li>`).join('')+'</ul>'; }
+  return h+'</div>'; }
 function newsBlock(news){ if(!news||!news.length) return '<div class="news"><div class="empty">No recent updates.</div></div>';
   return '<div class="news">'+news.map(n=>`<a class="news-row row" href="${n.link}" target="_blank" rel="noopener">${n.title}<div class="when">${n.when?fmtDate(n.when):''}</div></a>`).join('')+'</div>'; }
 function teamCard(d){ return `<div class="card"><div class="head"><span class="name">${d.t.name}</span>`
-  +`<span class="league">${d.t.league}</span><span class="live-pill${d.live?' on':''}">● LIVE</span></div>`
-  +gameBlock(d)+newsBlock(d.news)+`</div>`; }
+  +`<span class="league">${d.t.league}</span><span class="live-pill${d.live?' on':''}">● LIVE</span></div>`+gameBlock(d)+newsBlock(d.news)+`</div>`; }
 function nflCol(d){ return `<div class="col"><div class="head"><span class="name">${d.t.name}</span>`
   +`<span class="live-pill${d.live?' on':''}">● LIVE</span></div>`+gameBlock(d)+newsBlock(d.news)+`</div>`; }
 
 let busy=false;
 async function refreshAll(){
   if(busy)return; busy=true; $('#status').textContent='updating…';
+  nflGames=null; // re-resolve each cycle
   const grid=$('#grid');
-  const errCard=t=>e=>({t,live:false,scoreHTML:'',clock:'',news:[{title:"Couldn't load",link:'#',when:''}]});
+  const err=t=>e=>({t,live:false,scoreHTML:'',clock:'',hl:null,events:[],news:[{title:"Couldn't load",link:'#',when:''}]});
   try{
     const [gb,pit,mci,nor,epl,swe]=await Promise.all([
-      team(NFL[0]).catch(errCard(NFL[0])), team(NFL[1]).catch(errCard(NFL[1])),
-      team(MCI).catch(errCard(MCI)), team(NOR).catch(errCard(NOR)),
+      nflTeam(NFL[0]).catch(err(NFL[0])), nflTeam(NFL[1]).catch(err(NFL[1])),
+      tsdbTeam(MCI).catch(err(MCI)), tsdbTeam(NOR).catch(err(NOR)),
       leagueFeed(EPL_LEAGUE).catch(()=>({title:EPL_LEAGUE.title,news:[]})),
       leagueFeed(SWE_LEAGUE).catch(()=>({title:SWE_LEAGUE.title,news:[]})),
     ]);
-    let h='';
-    h+='<h2 class="sec">NFL</h2>';
+    let h='<h2 class="sec">NFL</h2>';
     h+=`<div class="card span2"><div class="nfl-row">${nflCol(gb)}${nflCol(pit)}</div></div>`;
-    h+='<h2 class="sec">Premier League</h2>';
-    h+=teamCard(mci);
+    h+='<h2 class="sec">Premier League</h2>'+teamCard(mci);
     h+=`<div class="card"><div class="head"><span class="name">Other results</span><span class="league">${epl.title}</span></div>${newsBlock(epl.news)}</div>`;
-    h+='<h2 class="sec">Swedish football</h2>';
-    h+=teamCard(nor);
+    h+='<h2 class="sec">Swedish football</h2>'+teamCard(nor);
     h+=`<div class="card"><div class="head"><span class="name">Other results</span><span class="league">${swe.title}</span></div>${newsBlock(swe.news)}</div>`;
     grid.innerHTML=h;
     const live=grid.querySelectorAll('.live-pill.on').length;
+    REFRESH_MS = live? 25000 : 60000;  // tighten cadence during live games
     $('#status').textContent=(live?live+' live · ':'')+'updated '+new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
   }catch(e){ $('#status').textContent='error: '+e.message; }
-  finally{ busy=false; }
+  finally{ busy=false; schedule(); }
 }
+let timer=null;
+function schedule(){ clearTimeout(timer); timer=setTimeout(refreshAll,REFRESH_MS); }
 refreshAll();
-setInterval(refreshAll,REFRESH_MS);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshAll();});
 </script>
 </body>

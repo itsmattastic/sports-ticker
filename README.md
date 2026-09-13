@@ -17,13 +17,20 @@ A single-page, phone/iPad-friendly ticker for four teams:
 - NFL teams shown side-by-side; two-column responsive layout that collapses to one
   column on phones. Auto-refreshes every 60s and on tab focus.
 
-## Data source
-All data comes from **TheSportsDB** (`thesportsdb.com`, free public key `3`), which is
-**CORS-enabled**, so the page calls it directly from the browser — no backend, no proxy.
+## Data sources
+- **NFL** — `api.nfl.com` (NFL.com's own API). An anonymous token is minted client-side
+  using the public client key embedded in NFL.com's site JS (no login, no cost); the API
+  sends CORS `*`, so it's called directly from the browser. Gives **live play-by-play**:
+  down & distance, possession, quarter/clock, red-zone, and scoring/big plays.
+- **Football (Man City, Norrköping, league feeds)** — **TheSportsDB** (free key `3`,
+  CORS-enabled). Live **match events** (goals ⚽, cards 🟥🟨, subs 🔁) come from its
+  `lookuptimeline.php` endpoint during a live game.
 
-> Why not ESPN? ESPN's API blocks browser CORS inconsistently *and* blocks datacenter
-> IPs (so a Cloudflare Worker proxy gets 403). TheSportsDB works reliably from the
-> browser for all four teams, so the whole thing is a static page again.
+Refresh adapts: **25s** while any game is live, **60s** otherwise.
+
+> Reliability note: the NFL path uses NFL.com's public-but-unofficial client key. If NFL
+> rotates it or changes the schema, each NFL card falls back to TheSportsDB automatically
+> (score only), so the page never goes blank.
 
 ## Run locally
 ```bash
