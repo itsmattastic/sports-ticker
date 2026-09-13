@@ -184,9 +184,11 @@ async function tsdbTeam(t){
     scoreHTML=`<span>${show.strHomeTeam||''}</span><span class="num">${played?show.intHomeScore:'–'}</span>`
       +`<span class="vs">${t.league==='NFL'?'@':'v'}</span><span class="num">${played?show.intAwayScore:'–'}</span><span>${show.strAwayTeam||''}</span>`;
     const k=ksMillis(show),st=(show.strStatus||'').trim();
+    const finished = (st==='Match Finished'||st==='FT'||played);
     if(live){ clock='● LIVE'+(show.strProgress?' · '+show.strProgress:(st?' · '+st:''));
       events=await timeline(show.idEvent); }
-    else if(st==='Match Finished'||st==='FT'||played) clock='FT · '+(isNaN(k)?show.dateEvent:fmtDate(new Date(k).toISOString()));
+    else if(finished){ clock='FT · '+(isNaN(k)?show.dateEvent:fmtDate(new Date(k).toISOString()));
+      events=await timeline(show.idEvent); }   // show goals/cards for finished games too
     else clock='Kickoff '+(isNaN(k)?show.dateEvent:fmtDate(new Date(k).toISOString()));
   }
   const news=last.slice(0,4).map(e=>({title:`${e.strEvent} — ${e.intHomeScore??'–'}:${e.intAwayScore??'–'}`,
