@@ -1,0 +1,9 @@
+name = "sports-ticker"
+main = "worker.js"
+compatibility_date = "2026-09-11"
+
+# Serve the repo root as static assets; _worker.js handles /api/espn and
+# falls through to ASSETS for everything else.
+[assets]
+directory = "."
+binding = "ASSETS"
